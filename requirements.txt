@@ -2,3 +2,4 @@ fastapi
 uvicorn
 PyPDF2
 reportlab
+requests
