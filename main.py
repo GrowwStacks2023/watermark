@@ -3,8 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-import base64
 import io
+import base64
+import requests
 
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -21,10 +22,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ✅ Input schema (ALL dynamic)
+# ✅ Input schema (URL based)
 class WatermarkRequest(BaseModel):
-    pdfBase64: str
+    pdfUrl: str
     text: str = Field(..., example="CONFIDENTIAL")
     x: float = Field(..., example=150)
     y: float = Field(..., example=400)
@@ -35,16 +35,22 @@ class WatermarkRequest(BaseModel):
 @app.post("/watermark-pdf")
 async def watermark_pdf(payload: WatermarkRequest):
     try:
-        # Decode base64 PDF
-        try:
-            pdf_bytes = base64.b64decode(payload.pdfBase64)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid base64 PDF")
+        # 1️⃣ Download PDF (binary-safe)
+        response = requests.get(payload.pdfUrl, stream=True, timeout=30)
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download PDF")
+
+        pdf_bytes = response.content
+
+        # 2️⃣ Validate PDF signature
+        if not pdf_bytes.startswith(b"%PDF"):
+            raise HTTPException(status_code=400, detail="URL did not return a valid PDF file")
 
         pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
         pdf_writer = PdfWriter()
 
-        # Create watermark PDF
+        # 3️⃣ Create watermark
         packet = io.BytesIO()
         can = canvas.Canvas(packet, pagesize=letter)
 
@@ -58,12 +64,12 @@ async def watermark_pdf(payload: WatermarkRequest):
         watermark_reader = PdfReader(packet)
         watermark_page = watermark_reader.pages[0]
 
-        # Apply watermark to ALL pages
+        # 4️⃣ Apply watermark to all pages
         for page in pdf_reader.pages:
             page.merge_page(watermark_page)
             pdf_writer.add_page(page)
 
-        # Write output
+        # 5️⃣ Output PDF
         output = io.BytesIO()
         pdf_writer.write(output)
         output.seek(0)
