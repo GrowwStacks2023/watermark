@@ -3,9 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-import io
 import base64
-import requests
+import io
 
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -23,9 +22,9 @@ app.add_middleware(
 )
 
 
-# ✅ Input schema (URL instead of base64)
+# ✅ Input schema (ALL dynamic)
 class WatermarkRequest(BaseModel):
-    pdfUrl: str = Field(..., example="https://drive.google.com/uc?export=download&id=XXX")
+    pdfBase64: str
     text: str = Field(..., example="CONFIDENTIAL")
     x: float = Field(..., example=150)
     y: float = Field(..., example=400)
@@ -33,19 +32,19 @@ class WatermarkRequest(BaseModel):
     opacity: float = Field(..., example=0.4, ge=0, le=1)
 
 
-@app.post("/watermark-pdf-from-url")
-async def watermark_pdf_from_url(payload: WatermarkRequest):
+@app.post("/watermark-pdf")
+async def watermark_pdf(payload: WatermarkRequest):
     try:
-        # 🔽 Download PDF
-        response = requests.get(payload.pdfUrl, timeout=20)
+        # Decode base64 PDF
+        try:
+            pdf_bytes = base64.b64decode(payload.pdfBase64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 PDF")
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Unable to download PDF")
-
-        pdf_reader = PdfReader(io.BytesIO(response.content))
+        pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
         pdf_writer = PdfWriter()
 
-        # Create watermark
+        # Create watermark PDF
         packet = io.BytesIO()
         can = canvas.Canvas(packet, pagesize=letter)
 
@@ -56,14 +55,15 @@ async def watermark_pdf_from_url(payload: WatermarkRequest):
         can.save()
         packet.seek(0)
 
-        watermark_page = PdfReader(packet).pages[0]
+        watermark_reader = PdfReader(packet)
+        watermark_page = watermark_reader.pages[0]
 
-        # Apply watermark to all pages
+        # Apply watermark to ALL pages
         for page in pdf_reader.pages:
             page.merge_page(watermark_page)
             pdf_writer.add_page(page)
 
-        # Output PDF
+        # Write output
         output = io.BytesIO()
         pdf_writer.write(output)
         output.seek(0)
