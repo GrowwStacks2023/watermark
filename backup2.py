@@ -1,9 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import io
+import base64
 import requests
 
 from PyPDF2 import PdfReader, PdfWriter
@@ -21,7 +22,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Input schema
+# ✅ Input schema (URL based)
 class WatermarkRequest(BaseModel):
     pdfUrl: str
     text: str = Field(..., example="CONFIDENTIAL")
@@ -34,52 +35,58 @@ class WatermarkRequest(BaseModel):
 @app.post("/watermark-pdf")
 async def watermark_pdf(payload: WatermarkRequest):
     try:
-        # 1️⃣ Download PDF
-        response = requests.get(payload.pdfUrl, timeout=30)
+        # 1️⃣ Download PDF (binary-safe)
+        response = requests.get(payload.pdfUrl, stream=True, timeout=30)
+
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail="Failed to download PDF")
 
         pdf_bytes = response.content
 
-        # 2️⃣ Validate PDF
+        # 2️⃣ Validate PDF signature
         if not pdf_bytes.startswith(b"%PDF"):
-            raise HTTPException(status_code=400, detail="URL did not return a valid PDF")
+            raise HTTPException(status_code=400, detail="URL did not return a valid PDF file")
 
         pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
         pdf_writer = PdfWriter()
 
         # 3️⃣ Create watermark
-        watermark_stream = io.BytesIO()
-        c = canvas.Canvas(watermark_stream, pagesize=letter)
-        c.setFillColorRGB(0.6, 0.6, 0.6, alpha=payload.opacity)
-        c.setFont("Helvetica-Bold", payload.fontSize)
-        c.drawString(payload.x, payload.y, payload.text)
-        c.save()
+        packet = io.BytesIO()
+        can = canvas.Canvas(packet, pagesize=letter)
 
-        watermark_stream.seek(0)
-        watermark_pdf = PdfReader(watermark_stream)
-        watermark_page = watermark_pdf.pages[0]
+        can.setFillColorRGB(0.6, 0.6, 0.6, alpha=payload.opacity)
+        can.setFont("Helvetica-Bold", payload.fontSize)
+        can.drawString(payload.x, payload.y, payload.text)
 
-        # 4️⃣ Apply watermark
+        can.save()
+        packet.seek(0)
+
+        watermark_reader = PdfReader(packet)
+        watermark_page = watermark_reader.pages[0]
+
+        # 4️⃣ Apply watermark to all pages
         for page in pdf_reader.pages:
             page.merge_page(watermark_page)
             pdf_writer.add_page(page)
 
-        # 5️⃣ Write output PDF
-        output_stream = io.BytesIO()
-        pdf_writer.write(output_stream)
-        output_stream.seek(0)
+        # 5️⃣ Output PDF
+        output = io.BytesIO()
+        pdf_writer.write(output)
+        output.seek(0)
 
-        # 6️⃣ Return binary PDF response
-        return StreamingResponse(
-            output_stream,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": "attachment; filename=watermarked.pdf"
-            }
-        )
+        result_base64 = base64.b64encode(output.read()).decode("utf-8")
 
-    except HTTPException:
-        raise
+        return {
+            "success": True,
+            "message": "Watermark added successfully",
+            "pdfBase64": result_base64
+        }
+
+    except HTTPException as e:
+        raise e
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
